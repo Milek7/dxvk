@@ -445,6 +445,9 @@ namespace dxvk {
       m_initializer->InitTexture(texture->GetCommonTexture(), initialData);
       *ppTexture = texture.ref();
 
+      if (pSharedHandle != nullptr)
+        *pSharedHandle = texture.ref();
+
       return D3D_OK;
     }
     catch (const DxvkError& e) {
