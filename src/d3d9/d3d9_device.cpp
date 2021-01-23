@@ -14,6 +14,7 @@
 #include "d3d9_spec_constants.h"
 #include "d3d9_names.h"
 #include "d3d9_format_helpers.h"
+#include "d3d9_interop.h"
 
 #include "../dxvk/dxvk_adapter.h"
 #include "../dxvk/dxvk_instance.h"
@@ -51,7 +52,7 @@ namespace dxvk {
     , m_d3d9Options    ( dxvkDevice, pParent->GetInstance()->config() )
     , m_isSWVP         ( (BehaviorFlags & D3DCREATE_SOFTWARE_VERTEXPROCESSING) ? TRUE : FALSE ) {
     // If we can SWVP, then we use an extended constant set
-    // as SWVP has many more slots available than HWVP. 
+    // as SWVP has many more slots available than HWVP.
     bool canSWVP = CanSWVP();
     DetermineConstantLayouts(canSWVP);
 
@@ -80,6 +81,8 @@ namespace dxvk {
     CreateConstantBuffers();
 
     m_availableMemory = DetermineInitialTextureMemory();
+
+    m_d3d9VkInterop = new D3D9VkInterop(this);
   }
 
 
@@ -89,6 +92,7 @@ namespace dxvk {
 
     delete m_initializer;
     delete m_converter;
+    delete m_d3d9VkInterop;
 
     m_dxvkDevice->waitForIdle(); // Sync Device
   }
@@ -107,6 +111,11 @@ namespace dxvk {
      || riid == __uuidof(IDirect3DDevice9)
      || extended) {
       *ppvObject = ref(this);
+      return S_OK;
+    }
+
+    if (riid == __uuidof(IDXGIVkInteropDevice)) {
+      *ppvObject = ref(m_d3d9VkInterop);
       return S_OK;
     }
 
@@ -231,6 +240,32 @@ namespace dxvk {
     // Software Cursor...
     Logger::warn("D3D9DeviceEx::SetCursorProperties: Software cursor not implemented.");
     return D3D_OK;
+  }
+
+  void STDMETHODCALLTYPE D3D9DeviceEx::TransitionSurfaceLayout(
+          IDXGIVkInteropSurface*    pSurface,
+    const VkImageSubresourceRange*  pSubresources,
+          VkImageLayout             OldLayout,
+          VkImageLayout             NewLayout) {
+    D3D9DeviceLock lock = LockDevice();
+
+    Com<IDirect3DTexture9> resource;
+
+    pSurface->QueryInterface(__uuidof(IDirect3DTexture9),
+      reinterpret_cast<void**>(&resource));
+
+    D3D9CommonTexture *texture = static_cast<D3D9Texture2D*>(resource.ptr())->GetCommonTexture();
+
+    EmitCs([
+      cImage        = texture->GetImage(),
+      cSubresources = *pSubresources,
+      cOldLayout    = OldLayout,
+      cNewLayout    = NewLayout
+    ] (DxvkContext* ctx) {
+      ctx->transformImage(
+        cImage, cSubresources,
+        cOldLayout, cNewLayout);
+    });
   }
 
 
@@ -723,7 +758,7 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     const Rc<DxvkImage> dstImage  = dstTexInfo->GetImage();
-      
+
     uint32_t mipLevels   = std::min(srcTexInfo->Desc()->MipLevels, dstTexInfo->Desc()->MipLevels);
     uint32_t arraySlices = std::min(srcTexInfo->Desc()->ArraySize, dstTexInfo->Desc()->ArraySize);
     for (uint32_t a = 0; a < arraySlices; a++) {
@@ -731,9 +766,9 @@ namespace dxvk {
         Rc<DxvkBuffer> srcBuffer = srcTexInfo->GetBuffer(srcTexInfo->CalcSubresource(a, m));
 
         VkImageSubresourceLayers dstLayers = { VK_IMAGE_ASPECT_COLOR_BIT, m, a, 1 };
-        
+
         VkExtent3D extent = dstImage->mipLevelExtent(m);
-        
+
         EmitCs([
           cDstImage  = dstImage,
           cSrcBuffer = srcBuffer,
@@ -927,7 +962,7 @@ namespace dxvk {
 
     if (unlikely(IsBlitRegionInvalid(blitInfo.dstOffsets, dstExtent)))
       return D3DERR_INVALIDCALL;
-    
+
     VkExtent3D srcCopyExtent =
     { uint32_t(blitInfo.srcOffsets[1].x - blitInfo.srcOffsets[0].x),
       uint32_t(blitInfo.srcOffsets[1].y - blitInfo.srcOffsets[0].y),
@@ -1639,9 +1674,9 @@ namespace dxvk {
 
     if (unlikely(ShouldRecord()))
       return m_recorder->SetClipPlane(Index, pPlane);
-    
+
     bool dirty = false;
-    
+
     for (uint32_t i = 0; i < 4; i++) {
       dirty |= m_state.clipPlanes[Index].coeff[i] != pPlane[i];
       m_state.clipPlanes[Index].coeff[i] = pPlane[i];
@@ -1649,10 +1684,10 @@ namespace dxvk {
 
     bool enabled = m_state.renderStates[D3DRS_CLIPPLANEENABLE] & (1u << Index);
     dirty &= enabled;
-    
+
     if (dirty)
       m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
-    
+
     return D3D_OK;
   }
 
@@ -1662,10 +1697,10 @@ namespace dxvk {
 
     if (unlikely(Index >= caps::MaxClipPlanes || !pPlane))
       return D3DERR_INVALIDCALL;
-    
+
     for (uint32_t i = 0; i < 4; i++)
       pPlane[i] = m_state.clipPlanes[Index].coeff[i];
-    
+
     return D3D_OK;
   }
 
@@ -1782,7 +1817,7 @@ namespace dxvk {
           UpdateActiveRTs(3);
           m_flags.set(D3D9DeviceFlag::DirtyBlendState);
           break;
-        
+
         case D3DRS_ALPHATESTENABLE: {
           bool newATOC = IsAlphaToCoverageEnabled();
           bool newAlphaTest = IsAlphaTestEnabled();
@@ -2509,7 +2544,7 @@ namespace dxvk {
     // We unbound the pixel shader before,
     // let's make sure that gets rebound.
     m_flags.set(D3D9DeviceFlag::DirtyFFPixelShader);
-    
+
     if (m_state.pixelShader != nullptr) {
       BindShader<DxsoProgramTypes::PixelShader>(
         GetCommonShader(m_state.pixelShader),
@@ -2874,7 +2909,7 @@ namespace dxvk {
 
     if (likely(pStride != nullptr))
       *pStride = 0;
-    
+
     if (unlikely(ppStreamData == nullptr || pOffsetInBytes == nullptr || pStride == nullptr))
       return D3DERR_INVALIDCALL;
 
@@ -3576,7 +3611,7 @@ namespace dxvk {
     DWORD newUsage = newTexture != nullptr ? newTexture->Desc()->Usage : 0;
 
     DWORD combinedUsage = oldUsage | newUsage;
-    
+
     TextureChangePrivate(m_state.textures[StateSampler], pTexture);
 
     BindTexture(StateSampler);
@@ -3935,7 +3970,7 @@ namespace dxvk {
 
     VkExtent3D levelExtent = pResource->GetExtentMip(MipLevel);
     VkExtent3D blockCount  = util::computeBlockCount(levelExtent, formatInfo->blockSize);
-    
+
     const bool systemmem = desc.Pool == D3DPOOL_SYSTEMMEM;
     const bool managed   = IsPoolManaged(desc.Pool);
     const bool scratch   = desc.Pool == D3DPOOL_SCRATCH;
@@ -3977,9 +4012,9 @@ namespace dxvk {
     // a depth stencil, or auto generate mipmaps.
     bool dirty = pResource->GetDirty(Subresource) || renderable;
     pResource->SetDirty(Subresource, false);
-      
+
     DxvkBufferSliceHandle physSlice;
-      
+
     if (Flags & D3DLOCK_DISCARD) {
       // We do not have to preserve the contents of the
       // buffer if the entire image gets discarded.
@@ -4224,7 +4259,7 @@ namespace dxvk {
           VkOffset3D{ 0, 0, 0 }, cDstLevelExtent,
           cSrcBuffer, 0, { 0u, 0u });
       });
-    } 
+    }
     else {
       Flush();
       SynchronizeCsThread();
@@ -4598,7 +4633,7 @@ namespace dxvk {
                            DxsoProgramType::PixelShader,
                            DxsoConstantBuffers::PSConstantBuffer);
 
-    m_vsClipPlanes = 
+    m_vsClipPlanes =
       CreateConstantBuffer(false,
                            caps::MaxClipPlanes * sizeof(D3D9ClipPlane),
                            DxsoProgramType::VertexShader,
@@ -4707,16 +4742,16 @@ namespace dxvk {
 
   void D3D9DeviceEx::UpdateClipPlanes() {
     m_flags.clr(D3D9DeviceFlag::DirtyClipPlanes);
-    
+
     auto slice = m_vsClipPlanes->allocSlice();
     auto dst = reinterpret_cast<D3D9ClipPlane*>(slice.mapPtr);
-    
+
     for (uint32_t i = 0; i < caps::MaxClipPlanes; i++) {
       dst[i] = (m_state.renderStates[D3DRS_CLIPPLANEENABLE] & (1 << i))
         ? m_state.clipPlanes[i]
         : D3D9ClipPlane();
     }
-    
+
     EmitCs([
       cBuffer = m_vsClipPlanes,
       cSlice  = slice
@@ -4798,7 +4833,7 @@ namespace dxvk {
     else
       Logger::warn("D3D9: Invalid push constant set to update.");
   }
-  
+
 
 
   void D3D9DeviceEx::Flush() {
@@ -4966,7 +5001,7 @@ namespace dxvk {
     m_activeTexturesToGen &= ~mask;
   }
 
-  
+
   void D3D9DeviceEx::MarkTextureMipsDirty(D3D9CommonTexture* pResource) {
     pResource->SetNeedsMipGen(true);
 
@@ -5440,13 +5475,13 @@ namespace dxvk {
 
   void D3D9DeviceEx::BindAlphaTestState() {
     m_flags.clr(D3D9DeviceFlag::DirtyAlphaTestState);
-    
+
     auto& rs = m_state.renderStates;
-    
+
     VkCompareOp alphaOp = IsAlphaTestEnabled()
       ? DecodeCompareOp(D3DCMPFUNC(rs[D3DRS_ALPHAFUNC]))
       : VK_COMPARE_OP_ALWAYS;
-    
+
     EmitCs([cAlphaOp = alphaOp] (DxvkContext* ctx) {
       ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, D3D9SpecConstantId::AlphaTestEnable, cAlphaOp != VK_COMPARE_OP_ALWAYS);
       ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, D3D9SpecConstantId::AlphaCompareOp,  cAlphaOp);
@@ -5629,7 +5664,7 @@ namespace dxvk {
   void D3D9DeviceEx::UndirtySamplers() {
     for (uint32_t dirty = m_dirtySamplerStates; dirty; dirty &= dirty - 1)
       BindSampler(bit::tzcnt(dirty));
-    
+
     m_dirtySamplerStates = 0;
   }
 
@@ -5707,7 +5742,7 @@ namespace dxvk {
 
     if (m_flags.test(D3D9DeviceFlag::DirtyBlendState))
       BindBlendState();
-    
+
     if (m_flags.test(D3D9DeviceFlag::DirtyDepthStencilState))
       BindDepthStencilState();
 
@@ -5716,13 +5751,13 @@ namespace dxvk {
 
     if (m_flags.test(D3D9DeviceFlag::DirtyDepthBias))
       BindDepthBias();
-    
+
     if (m_flags.test(D3D9DeviceFlag::DirtyMultiSampleState))
       BindMultiSampleState();
 
     if (m_flags.test(D3D9DeviceFlag::DirtyAlphaTestState))
       BindAlphaTestState();
-    
+
     if (m_flags.test(D3D9DeviceFlag::DirtyClipPlanes))
       UpdateClipPlanes();
 
@@ -5953,7 +5988,7 @@ namespace dxvk {
         // out attributes and bindings not used by the shader
         uint32_t attrCount = CompactSparseList(attrList.data(), attrMask);
         uint32_t bindCount = CompactSparseList(bindList.data(), bindMask);
-      
+
         ctx->setInputLayout(
           attrCount, attrList.data(),
           bindCount, bindList.data());
@@ -5969,8 +6004,8 @@ namespace dxvk {
         UINT                              Stride) {
     EmitCs([
       cSlotId       = Slot,
-      cBufferSlice  = pBuffer != nullptr ? 
-          pBuffer->GetCommonBuffer()->GetBufferSlice<D3D9_COMMON_BUFFER_TYPE_REAL>(Offset) 
+      cBufferSlice  = pBuffer != nullptr ?
+          pBuffer->GetCommonBuffer()->GetBufferSlice<D3D9_COMMON_BUFFER_TYPE_REAL>(Offset)
         : DxvkBufferSlice(),
       cStride       = pBuffer != nullptr ? Stride : 0
     ] (DxvkContext* ctx) {
@@ -6272,7 +6307,7 @@ namespace dxvk {
         data->TexcoordMatrices[i] = m_state.transforms[GetTransformIndex(D3DTS_TEXTURE0) + i];
 
       data->ViewportInfo = m_viewportInfo;
-      
+
       DecodeD3DCOLOR(m_state.renderStates[D3DRS_AMBIENT], data->GlobalAmbient.data);
 
       uint32_t lightIdx = 0;
@@ -6329,7 +6364,7 @@ namespace dxvk {
             return 0b100u; // Arg 2
           case D3DTOP_MULTIPLYADD:
           case D3DTOP_LERP:
-            return 0b111u; // Arg 0, 1, 2 
+            return 0b111u; // Arg 0, 1, 2
           default:
             return 0b110u; // Arg 1, 2
         }
@@ -6523,23 +6558,23 @@ namespace dxvk {
 
     const D3D9_VK_FORMAT_MAPPING srcFormatInfo = LookupFormat(srcDesc->Format);
     const D3D9_VK_FORMAT_MAPPING dstFormatInfo = LookupFormat(dstDesc->Format);
-    
+
     auto srcVulkanFormatInfo = imageFormatInfo(srcFormatInfo.FormatColor);
     auto dstVulkanFormatInfo = imageFormatInfo(dstFormatInfo.FormatColor);
-    
+
     const VkImageSubresource dstSubresource =
       dstTextureInfo->GetSubresourceFromIndex(
         dstVulkanFormatInfo->aspectMask, 0);
-    
+
     const VkImageSubresource srcSubresource =
       srcTextureInfo->GetSubresourceFromIndex(
         srcVulkanFormatInfo->aspectMask, src->GetSubresource());
-    
+
     const VkImageSubresourceLayers dstSubresourceLayers = {
       dstSubresource.aspectMask,
       dstSubresource.mipLevel,
       dstSubresource.arrayLayer, 1 };
-    
+
     const VkImageSubresourceLayers srcSubresourceLayers = {
       srcSubresource.aspectMask,
       srcSubresource.mipLevel,
@@ -6560,7 +6595,7 @@ namespace dxvk {
           cSrcImage, cSrcLayers, VkOffset3D { 0, 0, 0 },
           cDstImage->mipLevelExtent(cDstLayers.mipLevel));
       });
-    } else {      
+    } else {
       EmitCs([
         cDstImage  = dstTextureInfo->GetImage(),
         cSrcImage  = srcTextureInfo->GetImage(),
@@ -6615,7 +6650,7 @@ namespace dxvk {
     });
   }
 
-  
+
   HRESULT D3D9DeviceEx::ResetState(D3DPRESENT_PARAMETERS* pPresentationParameters) {
     if (!pPresentationParameters->EnableAutoDepthStencil)
       SetDepthStencilSurface(nullptr);
@@ -6684,7 +6719,7 @@ namespace dxvk {
 
     rs[D3DRS_TEXTUREFACTOR]       = 0xffffffff;
     m_flags.set(D3D9DeviceFlag::DirtyFFPixelData);
-    
+
     rs[D3DRS_DIFFUSEMATERIALSOURCE]  = D3DMCS_COLOR1;
     rs[D3DRS_SPECULARMATERIALSOURCE] = D3DMCS_COLOR2;
     rs[D3DRS_AMBIENTMATERIALSOURCE]  = D3DMCS_MATERIAL;

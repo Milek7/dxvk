@@ -29,6 +29,8 @@
 #include <type_traits>
 #include <unordered_map>
 
+struct IDXGIVkInteropSurface;
+
 namespace dxvk {
 
   class D3D9InterfaceEx;
@@ -41,6 +43,7 @@ namespace dxvk {
   class D3D9Query;
   class D3D9StateBlock;
   class D3D9FormatHelper;
+  class D3D9VkInterop;
 
   enum class D3D9DeviceFlag : uint32_t {
     DirtyFramebuffer,
@@ -864,6 +867,12 @@ namespace dxvk {
 
     void BindIndices();
 
+    void STDMETHODCALLTYPE TransitionSurfaceLayout(
+            IDXGIVkInteropSurface*    pSurface,
+      const VkImageSubresourceRange*  pSubresources,
+            VkImageLayout             OldLayout,
+            VkImageLayout             NewLayout);
+
     D3D9DeviceLock LockDevice() {
       return m_multithread.AcquireLock();
     }
@@ -1026,6 +1035,8 @@ namespace dxvk {
       false>>                       m_fvfTable;
 
     D3D9InputAssemblyState          m_iaState;
+
+    D3D9VkInterop* m_d3d9VkInterop = nullptr;
 
     uint32_t                        m_instancedData   = 0;
     uint32_t                        m_lastSamplerTypeBitfield = 0;

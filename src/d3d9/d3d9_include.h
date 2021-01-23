@@ -10,11 +10,15 @@
 #include <stdint.h>
 #include <d3d9.h>
 
+#ifndef DLLEXPORT
 //for some reason we need to specify __declspec(dllexport) for MinGW
 #if defined(__WINE__)
-#define DLLEXPORT __attribute__((visibility("default")))
+  #define DLLEXPORT __attribute__((visibility("default")))
+#elif defined(_MSC_VER)
+  #define DLLEXPORT
 #else
-#define DLLEXPORT
+  #define DLLEXPORT __declspec(dllexport)
+#endif
 #endif
 
 

@@ -4,12 +4,90 @@
 
 namespace dxvk {
 
+  D3D9VkInteropSurface::D3D9VkInteropSurface(
+          D3D9Texture2D*       pResource,
+          D3D9DeviceEx*        pDevice,
+          D3D9CommonTexture*   pTexture)
+  : m_resource  (pResource),
+    m_device    (pDevice),
+    m_texture   (pTexture) {
+
+  }
+
+
+  D3D9VkInteropSurface::~D3D9VkInteropSurface() {
+
+  }
+
+
+  ULONG STDMETHODCALLTYPE D3D9VkInteropSurface::AddRef() {
+    m_resource->AddRef();
+    return m_device->AddRef();
+  }
+
+
+  ULONG STDMETHODCALLTYPE D3D9VkInteropSurface::Release() {
+    m_resource->Release();
+    return m_device->Release();
+  }
+
+
+  HRESULT STDMETHODCALLTYPE D3D9VkInteropSurface::QueryInterface(
+          REFIID                  riid,
+          void**                  ppvObject) {
+    return m_resource->QueryInterface(riid, ppvObject);
+  }
+
+  HRESULT STDMETHODCALLTYPE D3D9VkInteropSurface::GetDevice(
+          IDXGIVkInteropDevice**  ppDevice) {
+    return m_device->QueryInterface(
+      __uuidof(IDXGIVkInteropDevice),
+      reinterpret_cast<void**>(ppDevice));
+  }
+
+  HRESULT STDMETHODCALLTYPE D3D9VkInteropSurface::GetVulkanImageInfo(
+          VkImage*              pHandle,
+          VkImageLayout*        pLayout,
+          VkImageCreateInfo*    pInfo) {
+    const Rc<DxvkImage> image = m_texture->GetImage();
+    const DxvkImageCreateInfo& info = image->info();
+
+    if (pHandle != nullptr)
+      *pHandle = image->handle();
+
+    if (pLayout != nullptr)
+      *pLayout = info.layout;
+
+    if (pInfo != nullptr) {
+      // We currently don't support any extended structures
+      if (pInfo->sType != VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+       || pInfo->pNext != nullptr)
+        return E_INVALIDARG;
+
+      pInfo->flags          = 0;
+      pInfo->imageType      = info.type;
+      pInfo->format         = info.format;
+      pInfo->extent         = info.extent;
+      pInfo->mipLevels      = info.mipLevels;
+      pInfo->arrayLayers    = info.numLayers;
+      pInfo->samples        = info.sampleCount;
+      pInfo->tiling         = info.tiling;
+      pInfo->usage          = info.usage;
+      pInfo->sharingMode    = VK_SHARING_MODE_EXCLUSIVE;
+      pInfo->queueFamilyIndexCount = 0;
+      pInfo->initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+
+    return S_OK;
+  }
+
   // Direct3DTexture9
 
   D3D9Texture2D::D3D9Texture2D(
           D3D9DeviceEx*             pDevice,
     const D3D9_COMMON_TEXTURE_DESC* pDesc)
-    : D3D9Texture2DBase( pDevice, pDesc, D3DRTYPE_TEXTURE ) { }
+    : D3D9Texture2DBase( pDevice, pDesc, D3DRTYPE_TEXTURE ),
+      m_interop        ( this, pDevice, &m_texture ) { }
 
 
   HRESULT STDMETHODCALLTYPE D3D9Texture2D::QueryInterface(REFIID riid, void** ppvObject) {
@@ -23,6 +101,11 @@ namespace dxvk {
      || riid == __uuidof(IDirect3DBaseTexture9)
      || riid == __uuidof(IDirect3DTexture9)) {
       *ppvObject = ref(this);
+      return S_OK;
+    }
+
+    if (riid == __uuidof(IDXGIVkInteropSurface)) {
+      *ppvObject = ref(&m_interop);
       return S_OK;
     }
 

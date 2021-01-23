@@ -1,5 +1,6 @@
 #pragma once
 
+#ifndef DLLEXPORT
 //for some reason we need to specify __declspec(dllexport) for MinGW
 #if defined(__WINE__)
   #define DLLEXPORT __attribute__((visibility("default")))
@@ -7,6 +8,7 @@
   #define DLLEXPORT
 #else
   #define DLLEXPORT __declspec(dllexport)
+#endif
 #endif
 
 #include "../util/com/com_guid.h"

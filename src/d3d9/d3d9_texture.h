@@ -11,7 +11,37 @@
 #include <new>
 #include <type_traits>
 
+#include "../dxgi/dxgi_interfaces.h"
+
 namespace dxvk {
+
+  class D3D9Texture2D;
+
+  class D3D9VkInteropSurface : public IDXGIVkInteropSurface {
+  public:
+    D3D9VkInteropSurface(D3D9Texture2D* pResource, D3D9DeviceEx* pDevice, D3D9CommonTexture* pTexture);
+    ~D3D9VkInteropSurface();
+
+    ULONG STDMETHODCALLTYPE AddRef();
+    ULONG STDMETHODCALLTYPE Release();
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(
+            REFIID                  riid,
+            void**                  ppvObject);
+
+    HRESULT STDMETHODCALLTYPE GetDevice(
+            IDXGIVkInteropDevice**  ppDevice);
+
+    HRESULT STDMETHODCALLTYPE GetVulkanImageInfo(
+            VkImage*              pHandle,
+            VkImageLayout*        pLayout,
+            VkImageCreateInfo*    pInfo);
+
+  private:
+    D3D9Texture2D* m_resource;
+    D3D9DeviceEx *m_device;
+    D3D9CommonTexture* m_texture;
+  };
 
   template <typename SubresourceType, typename... Base>
   class D3D9BaseTexture : public D3D9Resource<Base...> {
@@ -143,6 +173,7 @@ namespace dxvk {
 
     HRESULT STDMETHODCALLTYPE AddDirtyRect(CONST RECT* pDirtyRect);
 
+    D3D9VkInteropSurface m_interop;
   };
 
   using D3D9Texture3DBase = D3D9BaseTexture<D3D9Volume, IDirect3DVolumeTexture9>;
